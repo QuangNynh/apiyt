@@ -17,7 +17,7 @@
     "sharp": "^0.33.5",
     "youtube-dl-exec": "^3.0.10",
     "youtube-transcript-plus": "^1.2.0",
-    "youtubei.js": "^12.2.0"
+    "youtubei.js": "^18.3.0"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",

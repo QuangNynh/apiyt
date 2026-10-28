@@ -56,7 +56,10 @@ export class YouTubeToolsService {
 
   private async ready() {
     if (!this.initialization) {
-      this.initialization = loadYoutube().then(async ({ Innertube }) => {
+      this.initialization = loadYoutube().then(async ({ Innertube, Log }) => {
+        if (Log?.setLevel) {
+          Log.setLevel(Log.Level.ERROR);
+        }
         this.youtube = await Innertube.create();
       }).catch(error => { this.initialization = undefined; throw error; });
     }
