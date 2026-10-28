@@ -9,7 +9,7 @@ import { pipeline } from 'stream/promises';
 import axios from 'axios';
 import Ffmpeg from 'fluent-ffmpeg';
 import sharp from 'sharp';
-import { exec as youtubeDlExec } from 'youtube-dl-exec';
+import { create as createYoutubeDl } from 'youtube-dl-exec';
 import { youtubeVideoId } from './youtube-download-policy';
 import { playableMp4 } from './video-file';
 import { youtubeVideoDate } from './youtube-video-date';
@@ -17,6 +17,9 @@ import { youtubeVideoDate } from './youtube-video-date';
 const execFileAsync = promisify(execFile);
 const ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg';
 Ffmpeg.setFfmpegPath(ffmpegPath);
+
+const ytdlBinary = process.env.YTDLP_PATH || (fs.existsSync('/usr/local/bin/yt-dlp') ? '/usr/local/bin/yt-dlp' : undefined);
+const youtubeDlExec = ytdlBinary ? createYoutubeDl(ytdlBinary) : require('youtube-dl-exec').exec;
 
 const loadYoutube = new Function('return import("youtubei.js")') as () => Promise<any>;
 const loadTranscript = new Function('return import("youtube-transcript-plus")') as () => Promise<any>;
@@ -213,7 +216,14 @@ export class YouTubeToolsService {
         sleepRequests: 0.75,
         ...this.getCookieOption(),
       };
-      const result = await youtubeDlExec(url, ytDlOpts);
+      let result: any;
+      try {
+        result = await youtubeDlExec(url, ytDlOpts);
+      } catch (err: any) {
+        const errorMsg = String(err.stderr || err.message || '');
+        console.error('[yt-dlp channel error]', errorMsg);
+        throw new Error(errorMsg || err.message || 'Lỗi khi quét kênh bằng yt-dlp');
+      }
       if (!result) throw new Error('No data returned from youtube-dl');
 
       const parsed = JSON.parse(result.stdout);
