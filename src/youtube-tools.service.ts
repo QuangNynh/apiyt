@@ -235,17 +235,25 @@ export class YouTubeToolsService {
         sleepRequests: 0.75,
         ...this.getCookieOption(),
       };
-      let result: any;
+      // Phục hồi kết quả nếu đã cào được các trang trước (ví dụ page 1 đến page 5)
+      let parsed: any;
       try {
         result = await youtubeDlExec(url, ytDlOpts);
+        parsed = JSON.parse(result.stdout);
       } catch (err: any) {
-        const errorMsg = String(err.stderr || err.message || '');
-        console.error('[yt-dlp channel error]', errorMsg);
-        throw new Error(errorMsg || err.message || 'Lỗi khi quét kênh bằng yt-dlp');
+        const stdout = String(err.stdout || '');
+        if (stdout.includes('"entries":')) {
+          try {
+            parsed = JSON.parse(stdout);
+            console.warn('[yt-dlp partial] Recovered partial channel entries before 403 error');
+          } catch { /* Ignore */ }
+        }
+        if (!parsed) {
+          const errorMsg = String(err.stderr || err.message || '');
+          console.error('[yt-dlp channel error]', errorMsg);
+          throw new Error(errorMsg || err.message || 'Lỗi khi quét kênh bằng yt-dlp');
+        }
       }
-      if (!result) throw new Error('No data returned from youtube-dl');
-
-      const parsed = JSON.parse(result.stdout);
       const rawEntries: any[] = [];
       const visit = (entry: any) => {
         if (!entry || typeof entry !== 'object') return;
