@@ -50,6 +50,25 @@ export class YouTubeToolsService {
   private initialization?: Promise<void>;
 
   private getCookieOption(): Record<string, string> {
+    // 1. Nếu có biến môi trường YT_COOKIES dạng chuỗi base64 hoặc raw text
+    if (process.env.YT_COOKIES && process.env.YT_COOKIES.trim()) {
+      const targetPath = '/tmp/youtube_cookies.txt';
+      try {
+        let content = process.env.YT_COOKIES.trim();
+        // Nếu là base64 thì giải mã
+        if (!content.includes('\t') && !content.includes('# Netscape') && content.length > 50) {
+          try { content = Buffer.from(content, 'base64').toString('utf8'); } catch { /* Ignore */ }
+        }
+        if (!fs.existsSync(targetPath) || fs.readFileSync(targetPath, 'utf8') !== content) {
+          fs.writeFileSync(targetPath, content, { mode: 0o600 });
+        }
+        return { cookies: targetPath };
+      } catch (e) {
+        console.warn('[Cookies] Failed to write cookie from env:', e);
+      }
+    }
+
+    // 2. Nếu có file cookies.txt ở đường dẫn chỉ định hoặc /app/cookies.txt
     const cookiePath = process.env.YT_COOKIES_PATH || (fs.existsSync('/app/cookies.txt') ? '/app/cookies.txt' : undefined);
     if (cookiePath && fs.existsSync(cookiePath)) {
       return { cookies: cookiePath };
