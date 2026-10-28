@@ -109,44 +109,51 @@ export class YouTubeToolsService {
 
   async getTranscript(videoId: string, preferredLang = 'en') {
     videoId = this.extractVideoId(videoId);
-    const maxRetries = 10;
+    const maxRetries = 3;
     let lastError: any;
 
+    // 1. Luôn ưu tiên lấy phụ đề bằng youtube-transcript-plus trước
+    // Phương thức này dùng endpoint timedtext của YouTube, không bị 403 chặn như Innertube getInfo()
+    let transcriptData: { transcript: any; usedLang: string | null } = { transcript: null, usedLang: null };
+    try {
+      transcriptData = await this.fetchTranscriptWithFallback(videoId, preferredLang);
+    } catch (err: any) {
+      lastError = err;
+    }
+
+    // 2. Thử lấy metadata bằng youtubei (nếu bị 403 do IP Datacenter thì fallback về cơ bản)
+    let metadata: any = null;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         await this.ready();
         const info = await this.youtube.getInfo(videoId);
-        const metadata = this.buildMetadata(info, videoId);
-
-        const { transcript, usedLang } = await this.fetchTranscriptWithFallback(videoId, preferredLang);
-
-        return {
-          success: !!transcript,
-          videoId,
-          transcript,
-          transcriptLanguage: usedLang,
-          metadata,
-          attempts: attempt,
-        };
+        metadata = this.buildMetadata(info, videoId);
+        break;
       } catch (error: any) {
         lastError = error;
-        if (error?.response?.status === 429) {
-          await this.sleep(10000);
-          continue;
+        // Nếu dính 403 Forbidden do YouTube chặn Innertube trên IP Datacenter
+        if (error?.status === 403 || String(error?.message).includes('403')) {
+          try {
+            const basic = await this.youtube.getBasicInfo(videoId);
+            metadata = this.buildMetadata(basic, videoId);
+            break;
+          } catch {
+            // Dừng retry nếu bị chặn IP để không tốn thời gian
+            break;
+          }
         }
-        if (attempt < maxRetries) {
-          await this.sleep(1000 * attempt);
-        }
+        if (attempt < maxRetries) await this.sleep(1000 * attempt);
       }
     }
 
+    const hasTranscript = !!transcriptData.transcript;
     return {
-      success: false,
+      success: hasTranscript || !!metadata,
       videoId,
-      transcript: null,
-      transcriptLanguage: null,
-      metadata: null,
-      error: lastError?.message || 'Unknown error',
+      transcript: transcriptData.transcript,
+      transcriptLanguage: transcriptData.usedLang,
+      metadata,
+      error: !hasTranscript && !metadata ? (lastError?.message || 'Unknown error') : undefined,
       attempts: maxRetries,
     };
   }
