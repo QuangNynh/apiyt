@@ -19,7 +19,7 @@ const ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg';
 Ffmpeg.setFfmpegPath(ffmpegPath);
 
 const ytdlBinary = process.env.YTDLP_PATH || (fs.existsSync('/usr/local/bin/yt-dlp') ? '/usr/local/bin/yt-dlp' : undefined);
-const youtubeDlExec = ytdlBinary ? createYoutubeDl(ytdlBinary) : require('youtube-dl-exec').exec;
+const youtubeDlExec = ytdlBinary ? createYoutubeDl(ytdlBinary).exec : require('youtube-dl-exec').exec;
 
 const loadYoutube = new Function('return import("youtubei.js")') as () => Promise<any>;
 const loadTranscript = new Function('return import("youtube-transcript-plus")') as () => Promise<any>;
@@ -239,9 +239,10 @@ export class YouTubeToolsService {
       let parsed: any;
       try {
         const result: any = await youtubeDlExec(url, ytDlOpts);
-        parsed = JSON.parse(result.stdout);
+        const rawJson = typeof result === 'string' ? result : result?.stdout || (typeof result === 'object' && !result?.stdout ? JSON.stringify(result) : '');
+        parsed = typeof result === 'object' && !result.stdout && result.entries ? result : JSON.parse(rawJson);
       } catch (err: any) {
-        const stdout = String(err.stdout || '');
+        const stdout = String(err.stdout || (err.result && err.result.stdout) || '');
         if (stdout.includes('"entries":')) {
           try {
             parsed = JSON.parse(stdout);
