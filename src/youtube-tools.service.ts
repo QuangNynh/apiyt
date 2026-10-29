@@ -238,7 +238,7 @@ export class YouTubeToolsService {
       // Phục hồi kết quả nếu đã cào được các trang trước (ví dụ page 1 đến page 5)
       let parsed: any;
       try {
-        result = await youtubeDlExec(url, ytDlOpts);
+        const result: any = await youtubeDlExec(url, ytDlOpts);
         parsed = JSON.parse(result.stdout);
       } catch (err: any) {
         const stdout = String(err.stdout || '');
