@@ -13,7 +13,7 @@ import { create as createYoutubeDl } from 'youtube-dl-exec';
 import { youtubeVideoId } from './youtube-download-policy';
 import { playableMp4 } from './video-file';
 import { youtubeVideoDate } from './youtube-video-date';
-import { fetchYtdlpTranscript } from './youtube-transcript';
+import { fetchYtdlpTranscript, transcriptSetting } from './youtube-transcript';
 import { normalizeCookies } from './youtube-cookies';
 
 const execFileAsync = promisify(execFile);
@@ -107,7 +107,7 @@ export class YouTubeToolsService {
 
   private readonly transcriptCache = new Map<string, { expires: number; bytes: number; result: any }>();
   private readonly transcriptPending = new Map<string, Promise<any>>();
-  private readonly transcriptLimit = pLimit(2);
+  private readonly transcriptLimit = pLimit(transcriptSetting('YT_TRANSCRIPT_CONCURRENCY', 1, 1, 4));
 
   async getTranscript(value: string, preferredLang = 'en') {
     const videoId = this.extractVideoId(value);
@@ -157,15 +157,18 @@ export class YouTubeToolsService {
       const status = error.upstreamStatus || error.response?.status;
       const blocked = status === 403 || status === 429 || /429|403|sign in|bot|proxy/i.test(message);
       const cookieInvalid = /YT_COOKIES|Netscape/i.test(message);
-      const timeout = error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT' || !!error.signalCode;
+      const timeout = error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT' || error.diagnostic?.timedOut;
       const unavailable = /No accessible caption tracks|empty captions/i.test(message);
+      if (error.diagnostic) console.warn('[Transcript]', JSON.stringify({ videoId, stage: error.stage, ...error.diagnostic }));
       return { success: false, videoId, transcript: null, text: null,
         transcriptLanguage: null, metadata: null, attempts: 1,
         stage: error.stage || (cookieInvalid ? 'cookies' : 'extract'),
         ...(status ? { upstreamStatus: status } : {}),
+        ...(error.diagnostic ? { diagnostic: error.diagnostic } : {}),
         errorCode: cookieInvalid ? 'INVALID_COOKIES' : blocked ? 'YOUTUBE_ACCESS_BLOCKED' : timeout ? 'TRANSCRIPT_TIMEOUT' : unavailable ? 'CAPTIONS_UNAVAILABLE' : 'TRANSCRIPT_FETCH_FAILED',
         error: cookieInvalid ? 'Invalid YT_COOKIES format; use Netscape text with tab-separated columns or base64' : blocked
           ? 'YouTube blocked caption access; check Render outbound IP, YT_PROXY_URL and cookies'
+          : timeout ? 'Caption extraction exceeded the configured time budget; inspect diagnostic and Render logs'
           : unavailable ? 'No accessible captions for this video'
           : 'Could not retrieve captions: upstream timeout, network or extractor failure',
       };

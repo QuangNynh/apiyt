@@ -5,6 +5,28 @@ import * as os from 'os';
 import * as path from 'path';
 import { captionCookies, normalizeCookies } from './youtube-cookies';
 
+export function transcriptSetting(name: string, fallback: number, min: number, max: number) {
+  const value = Number(process.env[name]);
+  return Number.isInteger(value) && value >= min && value <= max ? value : fallback;
+}
+
+export function extractorDiagnostic(error: any, elapsedMs: number, timeoutMs: number) {
+  const text = String(error.stderr || error.message || '');
+  const signal = error.signalCode || error.signal;
+  const timedOut = error.code === 'ETIMEDOUT' || (signal === 'SIGTERM' && elapsedMs >= timeoutMs - 1000);
+  const reason = timedOut ? 'EXTRACTOR_DEADLINE'
+    : signal ? 'EXTRACTOR_TERMINATED'
+    : /cookies.*(?:expired|rotated|no longer valid)|not a valid.*cookie/i.test(text) ? 'COOKIE_SESSION_REJECTED'
+    : /sign in|not a bot|HTTP Error (403|429)/i.test(text) ? 'YOUTUBE_ACCESS_BLOCKED'
+    : /PO Token/i.test(text) ? 'PO_TOKEN_REQUIRED'
+    : /JavaScript runtime|challenge solving failed/i.test(text) ? 'JS_CHALLENGE_FAILED'
+    : /timed out|timeout/i.test(text) ? 'UPSTREAM_TIMEOUT'
+    : /Name or service not known|nodename nor servname|resolve/i.test(text) ? 'DNS_FAILURE'
+    : /no such option|unrecognized argument/i.test(text) ? 'EXTRACTOR_OPTION_UNSUPPORTED'
+    : error.code === 'ENOENT' ? 'EXTRACTOR_BINARY_MISSING' : 'EXTRACTOR_FAILED';
+  return { reason, elapsedMs, timeoutMs, ...(signal ? { signal } : {}), timedOut };
+}
+
 export function parseJson3(body: any, lang: string) {
   if (typeof body === 'string') body = JSON.parse(body);
   const segments = (body.events || []).flatMap((event: any) => {
@@ -52,13 +74,22 @@ export async function fetchYtdlpTranscript(
       cookies = { ...cookies, cookies: file };
     }
     stage = 'extract';
-    const result = await run(`https://www.youtube.com/watch?v=${videoId}`, {
-      dumpSingleJson: true, skipDownload: true, noPlaylist: true, ignoreConfig: true,
-      noWarnings: true, socketTimeout: 10, retries: 0, extractorRetries: 0,
-      jsRuntimes: 'node',
-      extractorArgs: 'youtube:skip=hls,dash,translated_subs',
-      ...cookies, ...(proxy ? { proxy } : {}),
-    }, { timeout: 25_000, maxBuffer: 8 * 1024 * 1024 });
+    const timeoutMs = transcriptSetting('YT_TRANSCRIPT_TIMEOUT_MS', 90_000, 10_000, 180_000);
+    const started = Date.now();
+    let result: any;
+    try {
+      result = await run(`https://www.youtube.com/watch?v=${videoId}`, {
+        dumpSingleJson: true, skipDownload: true, noPlaylist: true, ignoreConfig: true,
+        socketTimeout: 15, retries: 0, extractorRetries: 0,
+        ignoreNoFormatsError: true,
+        jsRuntimes: 'node',
+        extractorArgs: 'youtube:skip=hls,dash,translated_subs',
+        ...cookies, ...(proxy ? { proxy } : {}),
+      }, { timeout: timeoutMs });
+    } catch (error: any) {
+      error.diagnostic = extractorDiagnostic(error, Date.now() - started, timeoutMs);
+      throw error;
+    }
     stage = 'select';
     const raw = result.stdout ?? result;
     const info = typeof raw === 'string' ? JSON.parse(raw) : raw;

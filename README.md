@@ -81,13 +81,13 @@ trong cùng ngôn ngữ. `transcriptLanguage` là ngôn ngữ thực tế đã c
 - Chọn Docker runtime và Dockerfile của repo để có Python, FFmpeg và `yt-dlp`.
   Docker dùng Node 22, `npm ci`, và tải bản `yt-dlp` mới tại lúc build.
 - Health check: `/health`. Server đọc `PORT` do Render cấp.
-- Giới hạn chung hai video xử lý đồng thời cho cả endpoint đơn và batch;
+- Mặc định xử lý một video tại một thời điểm cho cả endpoint đơn và batch;
   mỗi batch tối đa 10 video (khớp client `lenytdesktop`).
 - Request trùng video/ngôn ngữ dùng chung tác vụ đang chạy.
   Cache kết quả thành công 1 giờ, tối đa 100 mục và 16 MiB payload mỗi instance;
   cache mất khi restart và không chia sẻ giữa các instance.
-- Mỗi video giới hạn 25 giây chạy extractor + 10 giây tải phụ đề, không retry dồn dập.
-  Batch 10 video có thể cần khoảng 175 giây khi upstream chậm; client cần timeout phù hợp.
+- Mỗi video mặc định giới hạn 90 giây chạy extractor + 10 giây tải phụ đề, không retry dồn dập.
+  Batch 10 video có thể cần khoảng 1.000 giây khi upstream chậm; nên thử một video trước, client cần timeout phù hợp.
 - Nếu Render bị YouTube chặn, cấu hình `YT_PROXY_URL=http://user:password@host:port`
   (hỗ trợ HTTP/HTTPS proxy). Cả bước tìm track và tải phụ đề đều dùng cùng proxy.
   Dùng proxy có IP ổn định trong suốt hai bước; không đưa mật khẩu proxy vào git.
@@ -112,3 +112,15 @@ Kết quả thất bại có `stage` (`cookies`, `extract`, `select`, `captions`
 và `upstreamStatus` nếu nhận được HTTP status. `INVALID_COOKIES` chỉ lỗi cấu hình;
 `TRANSCRIPT_TIMEOUT` chỉ timeout. Cookie đúng định dạng không chứng minh phiên còn hợp lệ
 hoặc IP Render được phép truy cập. Không chia sẻ cookie thật trong log, issue hay git.
+
+### Extractor chậm hoặc bị hệ thống dừng
+
+- `YT_TRANSCRIPT_TIMEOUT_MS`: giới hạn tiến trình, mặc định `90000`, chấp nhận `10000`–`180000`.
+- `YT_TRANSCRIPT_CONCURRENCY`: mặc định `1`, chấp nhận `1`–`4`; giữ `1` trên instance ít CPU/RAM.
+- Lỗi extractor có `diagnostic.reason`, `elapsedMs`, `timeoutMs` và `signal` nếu có.
+  Log Render có dòng `[Transcript]` với cùng thông tin, không chứa stderr thô, cookies hay proxy URL.
+- `EXTRACTOR_DEADLINE`: tiến trình chạm giới hạn; `EXTRACTOR_TERMINATED`: nhận tín hiệu dừng khác,
+  cần đối chiếu log/metrics Render, không tự kết luận là thiếu RAM.
+- `YOUTUBE_ACCESS_BLOCKED`, `COOKIE_SESSION_REJECTED`, `PO_TOKEN_REQUIRED`, `JS_CHALLENGE_FAILED`,
+  `DNS_FAILURE`, `UPSTREAM_TIMEOUT` là phân loại từ thông báo upstream, không đảm bảo chẩn đoán đầy đủ.
+- Tăng timeout không khắc phục được chặn IP hoặc phiên hết hiệu lực. Kiểm tra trên chính Render sau deploy.

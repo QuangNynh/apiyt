@@ -45,7 +45,7 @@ test('yt-dlp extracts captions without media download and builds real metadata',
       assert.notEqual(workerFile, cookieFile);
       assert.ok(fs.existsSync(workerFile));
       assert.equal(flags.proxy, process.env.YT_PROXY_URL);
-      assert.equal(opts.timeout, 25000);
+      assert.equal(opts.timeout, 90000);
       return { stdout: JSON.stringify({ title: 'Real title', subtitles: { en: [{ ext: 'json3', url: 'https://www.youtube.com/api/timedtext' }] } }) };
     }, { cookies: cookieFile });
     assert.equal(fs.existsSync(workerFile), false);
@@ -68,7 +68,7 @@ test('batch preserves order, limits concurrency, deduplicates requests and cache
   const results = await s.getTranscripts([...ids, ids[0]]);
   assert.deepEqual(results.map(r => r.videoId), [...ids, ids[0]]);
   assert.equal(calls, 4);
-  assert.equal(peak, 2);
+  assert.equal(peak, 1);
   assert.equal(results[0].text, 'Hello');
   await s.getTranscript(ids[0]);
   assert.equal(calls, 4);
@@ -119,4 +119,14 @@ test('HTTP failures retain stage and status without leaking upstream URLs', asyn
   assert.equal(result.stage, 'captions');
   assert.equal(result.upstreamStatus, 429);
   assert.equal(result.errorCode, 'YOUTUBE_ACCESS_BLOCKED');
+});
+
+test('extractor diagnostics distinguish deadline from external kill and redact stderr', () => {
+  const { extractorDiagnostic } = require('../dist/youtube-transcript');
+  assert.equal(extractorDiagnostic({ signalCode: 'SIGTERM' }, 90001, 90000).timedOut, true);
+  const killed = extractorDiagnostic({ signalCode: 'SIGKILL', stderr: 'secret-cookie' }, 2000, 90000);
+  assert.equal(killed.timedOut, false);
+  assert.equal(killed.reason, 'EXTRACTOR_TERMINATED');
+  assert.doesNotMatch(JSON.stringify(killed), /secret-cookie/);
+  assert.equal(extractorDiagnostic({ stderr: 'HTTP Error 429' }, 1000, 90000).reason, 'YOUTUBE_ACCESS_BLOCKED');
 });
