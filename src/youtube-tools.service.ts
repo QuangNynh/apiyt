@@ -13,6 +13,7 @@ import { create as createYoutubeDl } from 'youtube-dl-exec';
 import { youtubeVideoId } from './youtube-download-policy';
 import { playableMp4 } from './video-file';
 import { youtubeVideoDate } from './youtube-video-date';
+import { fetchYtdlpTranscript } from './youtube-transcript';
 
 const execFileAsync = promisify(execFile);
 const ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg';
@@ -22,8 +23,6 @@ const ytdlBinary = process.env.YTDLP_PATH || (fs.existsSync('/usr/local/bin/yt-d
 const youtubeDlExec = ytdlBinary ? createYoutubeDl(ytdlBinary).exec : require('youtube-dl-exec').exec;
 
 const loadYoutube = new Function('return import("youtubei.js")') as () => Promise<any>;
-const loadTranscript = new Function('return import("youtube-transcript-plus")') as () => Promise<any>;
-const fetchTranscript = async (id: string, options: any) => (await loadTranscript()).fetchTranscript(id, options);
 
 function pLimit(concurrency: number) {
   let active = 0;
@@ -113,111 +112,66 @@ export class YouTubeToolsService {
     };
   }
 
-  private async fetchTranscriptWithFallback(videoId: string, preferredLang = 'en') {
-    const langs = [...new Set([preferredLang, 'en', undefined])];
-    let lastError: unknown;
-    for (const lang of langs) {
-      try {
-        const request = (params: any) => fetch(params.url, {
-          method: params.method || 'GET',
-          headers: { 'User-Agent': params.userAgent, ...params.headers },
-          body: params.body,
-          signal: AbortSignal.timeout(15_000),
-        });
-        const transcript = await fetchTranscript(videoId, {
-          ...(lang ? { lang } : {}),
-          videoFetch: request, playerFetch: request, transcriptFetch: request,
-        });
-        if (!Array.isArray(transcript) || !transcript.some(item => item.text?.trim())) {
-          throw new Error('YouTube returned an empty transcript');
+  private readonly transcriptCache = new Map<string, { expires: number; bytes: number; result: any }>();
+  private readonly transcriptPending = new Map<string, Promise<any>>();
+  private readonly transcriptLimit = pLimit(2);
+
+  async getTranscript(value: string, preferredLang = 'en') {
+    const videoId = this.extractVideoId(value);
+    if (typeof preferredLang !== 'string' || !preferredLang.trim()) throw new Error('Invalid transcript language');
+    const key = `${videoId}:${preferredLang}`;
+    const cached = this.transcriptCache.get(key);
+    if (cached && cached.expires > Date.now()) return cached.result;
+    const pending = this.transcriptPending.get(key);
+    if (pending) return pending;
+    const task = this.transcriptLimit(async () => {
+      const result = await this.getTranscriptUncached(videoId, preferredLang);
+      if (result.success) {
+        const bytes = Buffer.byteLength(JSON.stringify(result));
+        // Bound both entry count and total payload size on small Render instances.
+        for (const [cacheKey, entry] of this.transcriptCache) {
+          if (entry.expires <= Date.now()) this.transcriptCache.delete(cacheKey);
         }
-        return { transcript, usedLang: transcript[0].lang || lang || 'auto' };
-      } catch (error: any) {
-        lastError = error;
-        // Only language selection errors benefit from retrying another language.
-        if (error?.name !== 'YoutubeTranscriptNotAvailableLanguageError') break;
+        if (bytes <= 16 * 1024 * 1024) {
+          let total = [...this.transcriptCache.values()].reduce((sum, entry) => sum + entry.bytes, 0);
+          while (this.transcriptCache.size && (this.transcriptCache.size >= 100 || total + bytes > 16 * 1024 * 1024)) {
+            const oldest = this.transcriptCache.keys().next().value!;
+            total -= this.transcriptCache.get(oldest)!.bytes;
+            this.transcriptCache.delete(oldest);
+          }
+          this.transcriptCache.set(key, { expires: Date.now() + 3600_000, bytes, result });
+        }
       }
-    }
-    throw lastError || new Error('No transcript available');
+      return result;
+    }).finally(() => this.transcriptPending.delete(key));
+    this.transcriptPending.set(key, task);
+    return task;
   }
 
-  private async fetchInnertubeTranscript(info: any) {
-    const result = await info.getTranscript();
-    const segments = result.transcript?.content?.body?.initial_segments || [];
-    const lang = result.selectedLanguage || 'auto';
-    const transcript = segments
-      .filter((segment: any) => segment.type === 'TranscriptSegment')
-      .map((segment: any) => ({
-        text: segment.snippet.toString(),
-        offset: Number(segment.start_ms) / 1000,
-        duration: (Number(segment.end_ms) - Number(segment.start_ms)) / 1000,
-        lang,
-      }))
-      .filter((segment: any) => segment.text.trim());
-    if (!transcript.length) throw new Error('YouTube returned an empty transcript');
-    return { transcript, usedLang: lang };
+  private async fetchYtdlpTranscript(videoId: string, lang: string) {
+    return fetchYtdlpTranscript(videoId, lang, youtubeDlExec, this.getCookieOption());
   }
 
-  async getTranscript(videoId: string, preferredLang = 'en') {
-    videoId = this.extractVideoId(videoId);
-    const maxRetries = 3;
-    let lastError: any;
-    let transcriptError: any;
-    let attempts = 0;
-
-    // 1. Luôn ưu tiên lấy phụ đề bằng youtube-transcript-plus trước
-    // Thư viện lấy caption tracks và timedtext; các endpoint vẫn có thể bị YouTube chặn.
-    let transcriptData: { transcript: any; usedLang: string | null } = { transcript: null, usedLang: null };
+  private async getTranscriptUncached(videoId: string, preferredLang = 'en') {
     try {
-      transcriptData = await this.fetchTranscriptWithFallback(videoId, preferredLang);
-    } catch (err: any) {
-      transcriptError = err;
+      const data = await this.fetchYtdlpTranscript(videoId, preferredLang);
+      return { success: true, videoId, transcript: data.transcript, metadata: data.metadata,
+        transcriptLanguage: data.usedLang,
+        text: data.transcript.map((item: any) => item.text).join(' '), error: null, attempts: 1 };
+    } catch (error: any) {
+      // Never expose proxy credentials or signed caption URLs from upstream errors.
+      const message = String(error.stderr || error.message || 'Caption extraction failed');
+      const blocked = /429|403|sign in|bot|proxy/i.test(message);
+      const unavailable = /No accessible caption tracks|empty captions/i.test(message);
+      return { success: false, videoId, transcript: null, text: null,
+        transcriptLanguage: null, metadata: null, attempts: 1,
+        errorCode: blocked ? 'YOUTUBE_ACCESS_BLOCKED' : unavailable ? 'CAPTIONS_UNAVAILABLE' : 'TRANSCRIPT_FETCH_FAILED',
+        error: blocked
+          ? 'YouTube blocked caption access; check Render outbound IP, YT_PROXY_URL and cookies'
+          : unavailable ? 'No accessible captions for this video'
+          : 'Could not retrieve captions: upstream timeout, network or extractor failure',
+      };
     }
-
-    // 2. Thử lấy metadata bằng youtubei (nếu bị 403 do IP Datacenter thì fallback về cơ bản)
-    let metadata: any = null;
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      attempts = attempt;
-      try {
-        await this.ready();
-        const info = await this.youtube.getInfo(videoId);
-        metadata = this.buildMetadata(info, videoId);
-        if (!transcriptData.transcript) {
-          try {
-            transcriptData = await this.fetchInnertubeTranscript(info);
-          } catch (error: any) {
-            transcriptError = new Error(`${transcriptError?.message || 'Primary transcript fetch failed'}; Innertube: ${error.message}`);
-          }
-        }
-        break;
-      } catch (error: any) {
-        lastError = error;
-        // Nếu dính 403 Forbidden do YouTube chặn Innertube trên IP Datacenter
-        if (error?.status === 403 || String(error?.message).includes('403')) {
-          try {
-            const basic = await this.youtube.getBasicInfo(videoId);
-            metadata = this.buildMetadata(basic, videoId);
-            break;
-          } catch {
-            // Dừng retry nếu bị chặn IP để không tốn thời gian
-            break;
-          }
-        }
-        if (attempt < maxRetries) await this.sleep(1000 * attempt);
-      }
-    }
-
-    const hasTranscript = !!transcriptData.transcript?.length;
-    return {
-      success: hasTranscript,
-      videoId,
-      transcript: transcriptData.transcript,
-      text: hasTranscript ? transcriptData.transcript.map((item: any) => item.text).join(' ') : null,
-      transcriptLanguage: transcriptData.usedLang,
-      metadata,
-      error: hasTranscript ? null : (transcriptError?.message || lastError?.message || 'No transcript available'),
-      attempts,
-    };
   }
 
   async getAll(videoId: string) {
@@ -230,17 +184,16 @@ export class YouTubeToolsService {
     }
   }
 
-  private readonly transcriptLimit = pLimit(6);
 
   async getTranscripts(videoIds: string[], preferredLang = 'en') {
     const tasks = videoIds.map((videoId) =>
-      this.transcriptLimit(async () => {
+      (async () => {
         try { return await this.getTranscript(videoId, preferredLang); }
         catch (error) {
           return { success: false, videoId, transcript: null, text: null, transcriptLanguage: null, metadata: null,
             error: error instanceof Error ? error.message : String(error), attempts: 0 };
         }
-      }),
+      })(),
     );
     return Promise.all(tasks);
   }

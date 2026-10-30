@@ -1,18 +1,18 @@
 # Build stage
-FROM node:20-alpine AS builder
+FROM node:22-alpine AS builder
 
 WORKDIR /app
 
 RUN apk add --no-cache python3 make g++
 
 COPY package*.json tsconfig.json ./
-RUN npm install
+RUN YOUTUBE_DL_SKIP_DOWNLOAD=1 npm ci
 
 COPY src/ ./src/
 RUN npm run build
 
 # Runtime stage
-FROM node:20-alpine
+FROM node:22-alpine
 
 WORKDIR /app
 
@@ -20,16 +20,17 @@ WORKDIR /app
 RUN apk add --no-cache python3 ffmpeg curl
 
 # Tải bản yt-dlp binary mới nhất
-RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && \
+RUN curl -fL --retry 3 https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && \
     chmod a+rx /usr/local/bin/yt-dlp
 
 COPY package*.json ./
-RUN npm install --only=production
+RUN YOUTUBE_DL_SKIP_DOWNLOAD=1 npm ci --omit=dev
 
 COPY --from=builder /app/dist ./dist
 
 ENV PORT=8000
 ENV FFMPEG_PATH=/usr/bin/ffmpeg
+ENV YTDLP_PATH=/usr/local/bin/yt-dlp
 EXPOSE 8000
 
 CMD ["node", "dist/server.js"]

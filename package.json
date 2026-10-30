@@ -14,9 +14,9 @@
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "fluent-ffmpeg": "^2.1.3",
+    "https-proxy-agent": "^7.0.6",
     "sharp": "^0.33.5",
     "youtube-dl-exec": "^3.0.10",
-    "youtube-transcript-plus": "^1.2.0",
     "youtubei.js": "^18.3.0"
   },
   "devDependencies": {

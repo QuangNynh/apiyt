@@ -1,52 +1,79 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { YouTubeToolsService } = require('../dist/youtube-tools.service');
+const { parseJson3, selectCaption, fetchYtdlpTranscript } = require('../dist/youtube-transcript');
+const axios = require('axios');
 const ids = ['Q5VD0Ha-D_U', '5K34NH3cTZc', 'qgxUwQQvrFM', '3cSwIMyD-30'];
-function service() {
-  const s = new YouTubeToolsService();
-  s.ready = async () => {};
-  s.youtube = { getInfo: async () => ({ basic_info: { title: 'Example' } }) };
-  return s;
-}
-test('metadata alone never reports transcript success and retains upstream error', async () => {
-  const s = service();
-  s.fetchTranscriptWithFallback = async () => { throw new Error('Primary blocked'); };
-  s.fetchInnertubeTranscript = async () => { throw new Error('Fallback blocked'); };
-  const results = await s.getTranscripts(ids);
-  assert.deepEqual(results.map(r => r.videoId), ids);
-  for (const r of results) {
-    assert.equal(r.success, false);
-    assert.equal(r.transcript, null);
-    assert.equal(r.text, null);
-    assert.equal(r.metadata.title, 'Example');
-    assert.match(r.error, /Primary blocked.*Fallback blocked/);
-    assert.equal(r.attempts, 1);
+const data = { transcript: [{ text: 'Hello', offset: 0, duration: 1, lang: 'en' }], usedLang: 'en', metadata: { title: 'Example' } };
+test('JSON3 parser joins text, normalizes seconds, and ignores empty events', () => {
+  assert.deepEqual(parseJson3({ events: [{}, { tStartMs: 1200, dDurationMs: 2300, segs: [{ utf8: 'Hello ' }, { utf8: 'world\n' }] }] }, 'en'),
+    [{ text: 'Hello world', offset: 1.2, duration: 2.3, lang: 'en' }]);
+  assert.throws(() => parseJson3({ events: [] }, 'en'), /empty captions/);
+});
+test('selects one requested-language track, prefers manual, falls back to original', () => {
+  const t = url => [{ ext: 'json3', url }];
+  const info = { language: 'vi', subtitles: { vi: t('manual') }, automatic_captions: { vi: t('auto'), 'vi-orig': t('original') } };
+  assert.equal(selectCaption(info, 'vi').track.url, 'manual');
+  assert.equal(selectCaption(info, 'en').lang, 'vi');
+  assert.throws(() => selectCaption({ subtitles: { live_chat: t('chat') } }, 'en'), /No accessible/);
+});
+test('yt-dlp extracts captions without media download and builds real metadata', async () => {
+  const previous = axios.default.get;
+  const proxy = process.env.YT_PROXY_URL;
+  process.env.YT_PROXY_URL = 'http://user:password@127.0.0.1:8080';
+  try {
+    axios.default.get = async (url, options) => {
+      assert.equal(url, 'https://www.youtube.com/api/timedtext');
+      assert.equal(options.proxy, false);
+      assert.ok(options.httpsAgent);
+      assert.equal(options.timeout, 10000);
+      return { data: { events: [{ tStartMs: 0, segs: [{ utf8: 'Hello' }] }] } };
+    };
+    const r = await fetchYtdlpTranscript(ids[0], 'en', async (url, flags, opts) => {
+      assert.equal(flags.skipDownload, true);
+      assert.equal(flags.ignoreConfig, true);
+      assert.equal(flags.cookies, '/tmp/test-cookies.txt');
+      assert.equal(flags.proxy, process.env.YT_PROXY_URL);
+      assert.equal(opts.timeout, 25000);
+      return { stdout: JSON.stringify({ title: 'Real title', subtitles: { en: [{ ext: 'json3', url: 'https://www.youtube.com/api/timedtext' }] } }) };
+    }, { cookies: '/tmp/test-cookies.txt' });
+    assert.equal(r.metadata.title, 'Real title');
+    assert.equal(r.transcript[0].text, 'Hello');
+  } finally {
+    axios.default.get = previous;
+    if (proxy === undefined) delete process.env.YT_PROXY_URL; else process.env.YT_PROXY_URL = proxy;
   }
 });
-test('primary transcript produces plain text and succeeds', async () => {
-  const s = service();
-  s.fetchTranscriptWithFallback = async () => ({ transcript: [{ text: 'Hello', lang: 'vi' }, { text: 'world', lang: 'vi' }], usedLang: 'vi' });
-  const r = await s.getTranscript(ids[0]);
-  assert.equal(r.success, true);
-  assert.equal(r.text, 'Hello world');
-  assert.equal(r.transcriptLanguage, 'vi');
-  assert.equal(r.error, null);
+test('batch preserves order, limits concurrency, deduplicates requests and caches success', async () => {
+  const s = new YouTubeToolsService();
+  let active = 0, peak = 0, calls = 0;
+  s.fetchYtdlpTranscript = async () => {
+    calls++; active++; peak = Math.max(peak, active);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    active--; return data;
+  };
+  const results = await s.getTranscripts([...ids, ids[0]]);
+  assert.deepEqual(results.map(r => r.videoId), [...ids, ids[0]]);
+  assert.equal(calls, 4);
+  assert.equal(peak, 2);
+  assert.equal(results[0].text, 'Hello');
+  await s.getTranscript(ids[0]);
+  assert.equal(calls, 4);
 });
-test('Innertube fallback normalizes segments and skips section headers', async () => {
-  const s = service();
-  s.fetchTranscriptWithFallback = async () => { throw new Error('Primary failed'); };
-  s.youtube.getInfo = async () => ({ basic_info: {}, getTranscript: async () => ({ selectedLanguage: 'Vietnamese', transcript: { content: { body: { initial_segments: [
-    { type: 'TranscriptSectionHeader' },
-    { type: 'TranscriptSegment', snippet: 'Xin chào', start_ms: '1000', end_ms: '2500' },
-  ] } } } }) });
+test('failure is explicit, redacts credentials, and is not cached', async () => {
+  const s = new YouTubeToolsService();
+  let calls = 0;
+  s.fetchYtdlpTranscript = async () => { calls++; throw new Error('403 http://user:secret@proxy'); };
   const r = await s.getTranscript(ids[0]);
-  assert.equal(r.success, true);
-  assert.equal(r.text, 'Xin chào');
-  assert.equal(r.transcript[0].offset, 1);
-  assert.equal(r.transcript[0].duration, 1.5);
+  assert.equal(r.success, false);
+  assert.equal(r.text, null);
+  assert.equal(r.errorCode, 'YOUTUBE_ACCESS_BLOCKED');
+  assert.doesNotMatch(r.error, /secret/);
+  await s.getTranscript(ids[0]);
+  assert.equal(calls, 2);
 });
 test('invalid IDs fail individually in batch', async () => {
-  const s = service();
+  const s = new YouTubeToolsService();
   const [r] = await s.getTranscripts(['invalid']);
   assert.equal(r.success, false);
   assert.equal(r.text, null);

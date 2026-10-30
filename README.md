@@ -71,9 +71,31 @@ YouTube có thể chặn IP của Datacenter. Để khắc phục:
 Client cần kiểm tra `item.success` trước khi hiển thị `item.text` hoặc ghép `item.transcript.map(segment => segment.text)`.
 Không dùng metadata để xác định đã lấy được kịch bản.
 
-Server thử ngôn ngữ yêu cầu, tiếng Anh rồi ngôn ngữ có sẵn nếu lỗi do thiếu ngôn ngữ;
-sau đó thử endpoint transcript của `youtubei.js` khi phương thức chính thất bại.
-Fallback này dùng ngôn ngữ mặc định của YouTube (có thể khác `lang` yêu cầu).
-YouTube vẫn có thể từ chối truy cập; fallback không đảm bảo vượt qua giới hạn IP.
+Server dùng `yt-dlp` để tìm caption tracks, chọn một track JSON3 rồi tải phụ đề;
+không tải video/audio và không gọi endpoint `get_transcript` đang trả 400.
+Ưu tiên ngôn ngữ yêu cầu, tiếng Anh rồi ngôn ngữ gốc/có sẵn, ưu tiên track thủ công
+trong cùng ngôn ngữ. `transcriptLanguage` là ngôn ngữ thực tế đã chọn.
+
+### Deploy transcript trên Render
+
+- Chọn Docker runtime và Dockerfile của repo để có Python, FFmpeg và `yt-dlp`.
+  Docker dùng Node 22, `npm ci`, và tải bản `yt-dlp` mới tại lúc build.
+- Health check: `/health`. Server đọc `PORT` do Render cấp.
+- Giới hạn chung hai video xử lý đồng thời cho cả endpoint đơn và batch;
+  mỗi batch tối đa 10 video (khớp client `lenytdesktop`).
+- Request trùng video/ngôn ngữ dùng chung tác vụ đang chạy.
+  Cache kết quả thành công 1 giờ, tối đa 100 mục và 16 MiB payload mỗi instance;
+  cache mất khi restart và không chia sẻ giữa các instance.
+- Mỗi video giới hạn 25 giây chạy extractor + 10 giây tải phụ đề, không retry dồn dập.
+  Batch 10 video có thể cần khoảng 175 giây khi upstream chậm; client cần timeout phù hợp.
+- Nếu Render bị YouTube chặn, cấu hình `YT_PROXY_URL=http://user:password@host:port`
+  (hỗ trợ HTTP/HTTPS proxy). Cả bước tìm track và tải phụ đề đều dùng cùng proxy.
+  Dùng proxy có IP ổn định trong suốt hai bước; không đưa mật khẩu proxy vào git.
+- Cookies tùy chọn: `YT_COOKIES` (Netscape raw/base64) hoặc `YT_COOKIES_PATH`.
+  Cookies được truyền vào extractor; cookies không đảm bảo khắc phục IP bị chặn.
+- Khi thất bại, `errorCode` phân biệt `YOUTUBE_ACCESS_BLOCKED`, `CAPTIONS_UNAVAILABLE`
+  và `TRANSCRIPT_FETCH_FAILED`. API không khẳng định video đã bị xóa chỉ vì request thất bại.
+- Rebuild/redeploy để cập nhật extractor khi YouTube thay đổi. Thành công ở local
+  không đảm bảo IP Render truy cập được; cần kiểm tra lại bốn video sau deploy.
 
 Kiểm thử: `npm run build` rồi `node --test tests/transcripts.cjs` (mock upstream, không gọi YouTube).

@@ -22,6 +22,9 @@ youtubeRouter.post('/transcript', async (req: Request, res: Response) => {
 // 2. Lấy phụ đề hàng loạt
 youtubeRouter.post('/transcripts', async (req: Request, res: Response) => {
   const { videoIds, lang = 'en' } = req.body;
+  if (Array.isArray(videoIds) && videoIds.length > 10) {
+    return res.status(400).json({ success: false, message: 'Tối đa 10 video mỗi request transcript' });
+  }
   if (!Array.isArray(videoIds) || !videoIds.length || videoIds.some(id => typeof id !== 'string' || !id.trim())) {
     return res.status(400).json({ success: false, message: 'videoIds phải là mảng Video ID' });
   }
