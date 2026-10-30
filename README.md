@@ -58,3 +58,22 @@ YouTube có thể chặn IP của Datacenter. Để khắc phục:
 | `POST` | `/api/v1/youtube/audio/youtubei`| `{"url": "https://...", "format": "mp3"}` | Tải audio bằng youtubei (nhẹ, ít bị chặn) |
 | `POST` | `/api/v1/youtube/audio` | `{"url": "https://..."}` | Tải audio bằng yt-dlp stream |
 | `POST` | `/api/v1/youtube/video` | `{"url": "https://...", "quality": "1080p"}` | Tải video chuẩn MP4 |
+
+### Phản hồi transcript
+
+`/transcript` trả một object; `/transcripts` trả một mảng theo thứ tự `videoIds`.
+`success` chỉ là `true` khi có transcript không rỗng. Metadata có thể vẫn có khi lấy phụ đề thất bại.
+
+- `transcript`: mảng `{ text, offset, duration, lang }` (thời gian tính bằng giây), hoặc `null`.
+- `text`: toàn bộ kịch bản ghép thành chuỗi, hoặc `null` khi thất bại.
+- `error`: thông báo lỗi lấy phụ đề khi thất bại; `null` khi thành công.
+
+Client cần kiểm tra `item.success` trước khi hiển thị `item.text` hoặc ghép `item.transcript.map(segment => segment.text)`.
+Không dùng metadata để xác định đã lấy được kịch bản.
+
+Server thử ngôn ngữ yêu cầu, tiếng Anh rồi ngôn ngữ có sẵn nếu lỗi do thiếu ngôn ngữ;
+sau đó thử endpoint transcript của `youtubei.js` khi phương thức chính thất bại.
+Fallback này dùng ngôn ngữ mặc định của YouTube (có thể khác `lang` yêu cầu).
+YouTube vẫn có thể từ chối truy cập; fallback không đảm bảo vượt qua giới hạn IP.
+
+Kiểm thử: `npm run build` rồi `node --test tests/transcripts.cjs` (mock upstream, không gọi YouTube).

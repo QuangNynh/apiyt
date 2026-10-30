@@ -114,42 +114,81 @@ export class YouTubeToolsService {
   }
 
   private async fetchTranscriptWithFallback(videoId: string, preferredLang = 'en') {
-    const langs = [preferredLang, 'en', undefined];
-    let usedLang = preferredLang;
-
+    const langs = [...new Set([preferredLang, 'en', undefined])];
+    let lastError: unknown;
     for (const lang of langs) {
       try {
-        const transcript = await fetchTranscript(videoId, lang ? { lang } : {});
-        usedLang = lang || 'auto';
-        return { transcript, usedLang };
-      } catch (err: any) {
-        if (!err.message?.includes('transcript')) throw err;
+        const request = (params: any) => fetch(params.url, {
+          method: params.method || 'GET',
+          headers: { 'User-Agent': params.userAgent, ...params.headers },
+          body: params.body,
+          signal: AbortSignal.timeout(15_000),
+        });
+        const transcript = await fetchTranscript(videoId, {
+          ...(lang ? { lang } : {}),
+          videoFetch: request, playerFetch: request, transcriptFetch: request,
+        });
+        if (!Array.isArray(transcript) || !transcript.some(item => item.text?.trim())) {
+          throw new Error('YouTube returned an empty transcript');
+        }
+        return { transcript, usedLang: transcript[0].lang || lang || 'auto' };
+      } catch (error: any) {
+        lastError = error;
+        // Only language selection errors benefit from retrying another language.
+        if (error?.name !== 'YoutubeTranscriptNotAvailableLanguageError') break;
       }
     }
-    return { transcript: null, usedLang: null };
+    throw lastError || new Error('No transcript available');
+  }
+
+  private async fetchInnertubeTranscript(info: any) {
+    const result = await info.getTranscript();
+    const segments = result.transcript?.content?.body?.initial_segments || [];
+    const lang = result.selectedLanguage || 'auto';
+    const transcript = segments
+      .filter((segment: any) => segment.type === 'TranscriptSegment')
+      .map((segment: any) => ({
+        text: segment.snippet.toString(),
+        offset: Number(segment.start_ms) / 1000,
+        duration: (Number(segment.end_ms) - Number(segment.start_ms)) / 1000,
+        lang,
+      }))
+      .filter((segment: any) => segment.text.trim());
+    if (!transcript.length) throw new Error('YouTube returned an empty transcript');
+    return { transcript, usedLang: lang };
   }
 
   async getTranscript(videoId: string, preferredLang = 'en') {
     videoId = this.extractVideoId(videoId);
     const maxRetries = 3;
     let lastError: any;
+    let transcriptError: any;
+    let attempts = 0;
 
     // 1. Luôn ưu tiên lấy phụ đề bằng youtube-transcript-plus trước
-    // Phương thức này dùng endpoint timedtext của YouTube, không bị 403 chặn như Innertube getInfo()
+    // Thư viện lấy caption tracks và timedtext; các endpoint vẫn có thể bị YouTube chặn.
     let transcriptData: { transcript: any; usedLang: string | null } = { transcript: null, usedLang: null };
     try {
       transcriptData = await this.fetchTranscriptWithFallback(videoId, preferredLang);
     } catch (err: any) {
-      lastError = err;
+      transcriptError = err;
     }
 
     // 2. Thử lấy metadata bằng youtubei (nếu bị 403 do IP Datacenter thì fallback về cơ bản)
     let metadata: any = null;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      attempts = attempt;
       try {
         await this.ready();
         const info = await this.youtube.getInfo(videoId);
         metadata = this.buildMetadata(info, videoId);
+        if (!transcriptData.transcript) {
+          try {
+            transcriptData = await this.fetchInnertubeTranscript(info);
+          } catch (error: any) {
+            transcriptError = new Error(`${transcriptError?.message || 'Primary transcript fetch failed'}; Innertube: ${error.message}`);
+          }
+        }
         break;
       } catch (error: any) {
         lastError = error;
@@ -168,15 +207,16 @@ export class YouTubeToolsService {
       }
     }
 
-    const hasTranscript = !!transcriptData.transcript;
+    const hasTranscript = !!transcriptData.transcript?.length;
     return {
-      success: hasTranscript || !!metadata,
+      success: hasTranscript,
       videoId,
       transcript: transcriptData.transcript,
+      text: hasTranscript ? transcriptData.transcript.map((item: any) => item.text).join(' ') : null,
       transcriptLanguage: transcriptData.usedLang,
       metadata,
-      error: !hasTranscript && !metadata ? (lastError?.message || 'Unknown error') : undefined,
-      attempts: maxRetries,
+      error: hasTranscript ? null : (transcriptError?.message || lastError?.message || 'No transcript available'),
+      attempts,
     };
   }
 
@@ -197,7 +237,7 @@ export class YouTubeToolsService {
       this.transcriptLimit(async () => {
         try { return await this.getTranscript(videoId, preferredLang); }
         catch (error) {
-          return { success: false, videoId, transcript: null, transcriptLanguage: null, metadata: null,
+          return { success: false, videoId, transcript: null, text: null, transcriptLanguage: null, metadata: null,
             error: error instanceof Error ? error.message : String(error), attempts: 0 };
         }
       }),
