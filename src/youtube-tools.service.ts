@@ -14,6 +14,7 @@ import { youtubeVideoId } from './youtube-download-policy';
 import { playableMp4 } from './video-file';
 import { youtubeVideoDate } from './youtube-video-date';
 import { fetchYtdlpTranscript } from './youtube-transcript';
+import { normalizeCookies } from './youtube-cookies';
 
 const execFileAsync = promisify(execFile);
 const ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg';
@@ -52,19 +53,11 @@ export class YouTubeToolsService {
     // 1. Nếu có biến môi trường YT_COOKIES dạng chuỗi base64 hoặc raw text
     if (process.env.YT_COOKIES && process.env.YT_COOKIES.trim()) {
       const targetPath = '/tmp/youtube_cookies.txt';
-      try {
-        let content = process.env.YT_COOKIES.trim();
-        // Nếu là base64 thì giải mã
-        if (!content.includes('\t') && !content.includes('# Netscape') && content.length > 50) {
-          try { content = Buffer.from(content, 'base64').toString('utf8'); } catch { /* Ignore */ }
-        }
-        if (!fs.existsSync(targetPath) || fs.readFileSync(targetPath, 'utf8') !== content) {
-          fs.writeFileSync(targetPath, content, { mode: 0o600 });
-        }
-        return { cookies: targetPath };
-      } catch (e) {
-        console.warn('[Cookies] Failed to write cookie from env:', e);
+      const content = normalizeCookies(process.env.YT_COOKIES);
+      if (!fs.existsSync(targetPath) || fs.readFileSync(targetPath, 'utf8') !== content) {
+        fs.writeFileSync(targetPath, content, { mode: 0o600 });
       }
+      return { cookies: targetPath };
     }
 
     // 2. Nếu có file cookies.txt ở đường dẫn chỉ định hoặc /app/cookies.txt
@@ -161,12 +154,17 @@ export class YouTubeToolsService {
     } catch (error: any) {
       // Never expose proxy credentials or signed caption URLs from upstream errors.
       const message = String(error.stderr || error.message || 'Caption extraction failed');
-      const blocked = /429|403|sign in|bot|proxy/i.test(message);
+      const status = error.upstreamStatus || error.response?.status;
+      const blocked = status === 403 || status === 429 || /429|403|sign in|bot|proxy/i.test(message);
+      const cookieInvalid = /YT_COOKIES|Netscape/i.test(message);
+      const timeout = error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT' || !!error.signalCode;
       const unavailable = /No accessible caption tracks|empty captions/i.test(message);
       return { success: false, videoId, transcript: null, text: null,
         transcriptLanguage: null, metadata: null, attempts: 1,
-        errorCode: blocked ? 'YOUTUBE_ACCESS_BLOCKED' : unavailable ? 'CAPTIONS_UNAVAILABLE' : 'TRANSCRIPT_FETCH_FAILED',
-        error: blocked
+        stage: error.stage || (cookieInvalid ? 'cookies' : 'extract'),
+        ...(status ? { upstreamStatus: status } : {}),
+        errorCode: cookieInvalid ? 'INVALID_COOKIES' : blocked ? 'YOUTUBE_ACCESS_BLOCKED' : timeout ? 'TRANSCRIPT_TIMEOUT' : unavailable ? 'CAPTIONS_UNAVAILABLE' : 'TRANSCRIPT_FETCH_FAILED',
+        error: cookieInvalid ? 'Invalid YT_COOKIES format; use Netscape text with tab-separated columns or base64' : blocked
           ? 'YouTube blocked caption access; check Render outbound IP, YT_PROXY_URL and cookies'
           : unavailable ? 'No accessible captions for this video'
           : 'Could not retrieve captions: upstream timeout, network or extractor failure',

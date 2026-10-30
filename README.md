@@ -99,3 +99,16 @@ trong cùng ngôn ngữ. `transcriptLanguage` là ngôn ngữ thực tế đã c
   không đảm bảo IP Render truy cập được; cần kiểm tra lại bốn video sau deploy.
 
 Kiểm thử: `npm run build` rồi `node --test tests/transcripts.cjs` (mock upstream, không gọi YouTube).
+
+### Chẩn đoán cookies và lỗi Render
+
+`YT_COOKIES` chấp nhận nội dung Netscape nhiều dòng hoặc base64. Dòng dữ liệu phải
+có bảy cột phân cách bằng tab; không đặt thêm dấu nháy bao quanh toàn bộ giá trị.
+Server chuẩn hóa CRLF và các chuỗi literal `\n`, `\t`, kiểm tra định dạng trước khi chạy.
+Mỗi worker dùng file riêng và truyền cookies cập nhật từ extractor cho request caption
+(trong phạm vi HTTPS YouTube), sau đó xóa file tạm của worker.
+
+Kết quả thất bại có `stage` (`cookies`, `extract`, `select`, `captions`, `parse`)
+và `upstreamStatus` nếu nhận được HTTP status. `INVALID_COOKIES` chỉ lỗi cấu hình;
+`TRANSCRIPT_TIMEOUT` chỉ timeout. Cookie đúng định dạng không chứng minh phiên còn hợp lệ
+hoặc IP Render được phép truy cập. Không chia sẻ cookie thật trong log, issue hay git.
